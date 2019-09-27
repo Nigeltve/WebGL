@@ -1,0 +1,490 @@
+﻿<html>
+    <head>
+        <meta charset="utf-8" />
+        <title>WebGL - Advaced Graphics Assingment</title>
+    </head>
+
+    <body onload="runWebGL();">
+
+        <!-- says assignemnt and name with student number -->
+        <i>
+            Advanced Graphics Assignment <br />
+            By: Nigel Thornewill von Essen <br />
+            Student number: s304434 <br />
+        </i>
+
+        <!-- sets canvis up with 16:9 aspect ratio-->
+        <canvas id="Model_space" width="700" height="394">
+            Your browser does not support the HTML5 canvas element.
+        </canvas>
+        <br /> <br />
+
+        <!-- define shader and fragment scripts-->
+        <!-- got this from inclass labs-->
+        <script id="shader-vs" type="x-shader/x-vertex">
+            attribute vec3 aVertexPosition;
+            attribute vec3 aVertexNormal;
+
+            uniform mat4 uMVMatrix;
+            uniform mat4 uPMatrix;
+            uniform mat4 uNMatrix;
+
+            varying vec3 vNormal;
+            varying vec3 vEyeVec;
+
+            void main(void) {
+            //Transformed vertex position
+            vec4 vertex = uMVMatrix * vec4(aVertexPosition, 1.0);
+
+            //Transformed normal position
+            vNormal = vec3(uNMatrix * vec4(aVertexNormal, 1.0));
+
+            //Vector Eye
+            vEyeVec = -vec3(vertex.xyz);
+
+            //Final vertex position
+            gl_Position = uPMatrix * uMVMatrix * vec4(aVertexPosition, 1.0);
+            }
+        </script>
+
+        <!-- got this from inclass labs-->
+        <script id="shader-fs" type="x-shader/x-fragment">
+            #ifdef GL_ES
+            precision highp float;
+            #endif
+
+            uniform float uShininess;        //shininess
+            uniform vec3 uLightDirection;  //light direction
+
+            uniform vec4 uLightAmbient;      //light ambient property
+            uniform vec4 uLightDiffuse;      //light diffuse property
+            uniform vec4 uLightSpecular;     //light specular property
+
+            uniform vec4 uMaterialAmbient;  //object ambient property
+            uniform vec4 uMaterialDiffuse;   //object diffuse property
+            uniform vec4 uMaterialSpecular;  //object specular property
+
+            varying vec3 vNormal;
+            varying vec3 vEyeVec;
+
+            void main(void){
+            vec3 L = normalize(uLightDirection);
+            vec3 N = normalize(vNormal);
+
+            //Lambert's cosine law
+            float lambertTerm = dot(N,-L);
+
+            //Ambient Term
+            vec4 Ia = uLightAmbient * uMaterialAmbient;
+
+            //Diffuse Term
+            vec4 Id = vec4(0.0,0.0,0.0,1.0);
+
+            //Specular Term
+            vec4 Is = vec4(0.0,0.0,0.0,1.0);
+
+            if(lambertTerm > 0.0) //only if lambertTerm is positive
+            {
+            Id = uLightDiffuse * uMaterialDiffuse * lambertTerm; //add diffuse term
+
+            vec3 E = normalize(vEyeVec);
+            vec3 R = reflect(L, N);
+            float specular = pow( max(dot(R, E), 0.0), uShininess);
+
+            Is = uLightSpecular * uMaterialSpecular * specular; //add specular term
+            }
+
+            //Final color
+            vec4 finalColor = Ia + Id + Is;
+            finalColor.a = 1.0;
+
+            gl_FragColor = finalColor;
+            }
+
+        </script>
+
+        <!-- other scripts used,
+         gl-matrix mainly used for mat4
+        utils used for
+            getGLContext
+            calculateNormals
+            getShaders
+    -->
+        <script type="text/javascript" src="util/gl-matrix-min.js"></script>
+        <script type="text/javascript" src="util/utils.js"></script>
+
+
+        <script type="text/javascript">
+
+            /**
+             *  is the script for the webgl program
+             *
+             *  it does lighting and loading in the
+             *  models for the drop down menu selection
+             *
+             *  uses phong lighting, (set to red)
+             *
+             */
+
+
+            // general things for the program to work
+            var gl = null;
+            var prg = null;
+
+            //context attributes
+            var c_width = 0;
+            var c_height = 0;
+            var clearColor = [0.1, 0.1, 0.1, 1.0];
+
+            var mvMatrix = mat4.create(); // The Model-View matrix
+            var pMatrix = mat4.create(); //  The projection matrix
+            var nMatrix = mat4.create(); //  the normal matrix
+
+            var modelVerticesBuffer; // Vertices buffer
+            var modelNormalBuffer; // normal buffer
+            var modelIndicesBuffer; //indices buffer
+
+            //model that needs to be loaded in
+            var model;
+
+            //init model arrays
+            var vertices = [];
+            var indices = [];
+            var normals = [];
+
+            //used for animation
+            var angle = 0;
+
+
+            //variables when changing models
+            var renderModelState = "HEAD";
+            var previous_state = null;
+            var cam_x = 0;
+            var cam_y = 0;
+            var cam_z = 0;
+
+            /**
+             *  loads model from json file
+             * @param filename path to json file. can be found in models/ folder
+             */
+            function loadModel(filename) {
+                //fetch request
+                var request = new XMLHttpRequest();
+                request.open("GET", filename); //opens document
+
+                request.onreadystatechange = function () {
+                    //console.info(request.readyState + ' - ' + request.status);
+                    if (request.readyState == 4) {
+                        if (request.status == 200) { //OK
+                            console.log("Model has been loaded: status 200");
+                            handleLoadedModel(JSON.parse(request.responseText)); //pass into this function to initbufferes
+
+                        }
+                        else if (document.domain.length == 0 && request.status == 0) { //OK but local, no web server
+                            Console.log("Model has been loaded: status 0");
+                            handleLoadedModel(JSON.parse(request.responseText));  //pass into this function to initbufferes
+
+                        }
+                        else {
+                            alert("There was a problem loading the file :" + filename);
+                            alert("HTML error code: " + request.status);
+                        }
+                    }
+                }
+                request.send();
+
+            }
+
+            /**
+             *  what handles to new model with initilising bufferes
+             *
+             * @param payload what the actual model is from what is loaded.
+             */
+            function handleLoadedModel(payload) {
+
+                //handles model bufferes
+
+                model = payload; //save our model in a global variable so we can retrieve it in drawScene
+
+                indices = model.indices; //saves indices of model
+                vertices = model.vertices; // saves vertices
+
+                normals = utils.calculateNormals(vertices, indices); // calculate normals
+
+                //init bufferes for vertices
+                modelVerticesBuffer = gl.createBuffer();
+                gl.bindBuffer(gl.ARRAY_BUFFER, modelVerticesBuffer);
+                gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertices), gl.STATIC_DRAW);
+
+                //init bufferes for inices
+                modelIndicesBuffer = gl.createBuffer();
+                gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, modelIndicesBuffer);
+                gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(indices), gl.STATIC_DRAW);
+
+                // init normal bufferes
+                modelNormalBuffer = gl.createBuffer();
+                gl.bindBuffer(gl.ARRAY_BUFFER, modelNormalBuffer);
+                gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(normals), gl.STATIC_DRAW);
+
+
+            }
+
+            /**
+             *  init the litting parameters
+             */
+            function initLight() {
+                //init light variables
+
+                gl.uniform3f(prg.uLightDirection, 1.0, -1.0, - 1.0);
+                gl.uniform4fv(prg.uLightAmbient, [0.1, 0.1, 0.1, 1.0]);
+                gl.uniform4fv(prg.uLightDiffuse, [1.0, 1.0, 1.0, 1.0]);
+                gl.uniform4fv(prg.uLightSpecular, [1.0, 1.0, 1.0, 1.0]);
+                gl.uniform4fv(prg.uMaterialAmbient, [1.0, 0.0, 1.0, 1.0]);
+                gl.uniform4fv(prg.uMaterialDiffuse, [0.5, 0.1, 0.1, 1.0]);
+                gl.uniform4fv(prg.uMaterialSpecular, [1, 0, 0, 1.0]);
+                gl.uniform1f(prg.uShininess, 230.0);
+            }
+            /**
+             * init the webgl program
+             */
+            function initProgram() {
+
+                //get fragment and vertex shaders
+                var fragmentShader = utils.getShader(gl, "shader-fs");
+                var vertexShader = utils.getShader(gl, "shader-vs");
+
+                //init program
+                prg = gl.createProgram();
+
+                // attach shaders to program
+                gl.attachShader(prg, vertexShader);
+                gl.attachShader(prg, fragmentShader);
+
+                //link everything together
+                gl.linkProgram(prg);
+
+                //check if linked properly
+                if (!gl.getProgramParameter(prg, gl.LINK_STATUS)) {
+                    console.error("ERROR: linking was not successful");
+                }
+
+                // say what program ctx is using
+                gl.useProgram(prg);
+
+                // sets all attributs for program
+                prg.aVertexPosition = gl.getAttribLocation(prg, "aVertexPosition");
+                prg.aVertexNormal = gl.getAttribLocation(prg, "aVertexNormal");
+                prg.uPMatrix = gl.getUniformLocation(prg, "uPMatrix");
+                prg.uMVMatrix = gl.getUniformLocation(prg, "uMVMatrix");
+                prg.uNMatrix = gl.getUniformLocation(prg, "uNMatrix");
+                prg.uMaterialAmbient = gl.getUniformLocation(prg, "uMaterialAmbient");
+                prg.uMaterialDiffuse = gl.getUniformLocation(prg, "uMaterialDiffuse");
+                prg.uMaterialSpecular = gl.getUniformLocation(prg, "uMaterialSpecular");
+                prg.uShininess = gl.getUniformLocation(prg, "uShininess");
+                prg.uLightAmbient = gl.getUniformLocation(prg, "uLightAmbient");
+                prg.uLightDiffuse = gl.getUniformLocation(prg, "uLightDiffuse");
+                prg.uLightSpecular = gl.getUniformLocation(prg, "uLightSpecular");
+                prg.uLightDirection = gl.getUniformLocation(prg, "uLightDirection");
+            }
+
+            /**
+             * draws the scene, loads in new model from drop down selection
+             */
+            function drawScene() {
+
+                //swaps case, if previous state is no selected state
+                // it loads the model and sets correct cam position
+                switch (renderModelState) {
+                    case "HEAD": {
+                        if (previous_state != "head") {
+                            //loads in model
+                            console.log("loading head");
+                            loadModel("models/head.json");
+                            previous_state = "head";
+
+                            //sets camera
+                            cam_x = 0.0;
+                            cam_y = 0.0;
+                            cam_z = -30.0;
+                        }
+
+                        break;
+                    }
+                    case "PUMPKIN": {
+
+                        if (previous_state != "pumpkin") {
+                            //loads in model
+                            console.log("loading pumpkin");
+                            loadModel("models/pumpkin.json");
+                            previous_state = "pumpkin";
+
+                            //sets camera
+                            cam_x = 0.0;
+                            cam_y = 0.0;
+                            cam_z = -300.0;
+                        }
+
+                        //loadModel("models/pumpkin.json");
+                        break;
+                    }
+                    case "SPHERE": {
+                        if (previous_state != "sphere") {
+                            //loads in model
+                            console.log("loading sphere");
+                            loadModel("models/sphere.json");
+                            previous_state = "sphere";
+
+                            //sets camera
+                            cam_x = 0.0;
+                            cam_y = 0.0;
+                            cam_z = -2.0;
+                        }
+                        break;
+                    }
+                    case "TEAPOT": {
+                        if (previous_state != "teapot") {
+                            //loads in model
+                            console.log("loading teapot");
+                            loadModel("models/teapot.json");
+                            previous_state = "teapot";
+
+                            //sets camera
+                            cam_x = 0.0;
+                            cam_y = -1.0;
+                            cam_z = -10.0;
+                        }
+                        break;
+                    }
+                    case "TEDDY": {
+                        if (previous_state != "teddy") {
+                            //loads in model
+                            console.log("loading teddy");
+                            loadModel("models/teddy.json");
+                            previous_state = "teddy";
+
+                            //sets camera
+                            cam_x = 0.0;
+                            cam_y = 0.0;
+                            cam_z = -60.0;
+                        }
+                        break;
+                    }
+                    // no default case needed, as it goes by what is selected
+                }
+
+                // sets color of background, and how unseen pollies are handled
+                gl.clearColor(clearColor[0], clearColor[1], clearColor[2], clearColor[3]);
+                gl.clearDepth(100.0);
+                gl.enable(gl.DEPTH_TEST);
+                gl.depthFunc(gl.LEQUAL);
+                gl.viewport(0, 0, c_width, c_height);
+                gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+                //settings for the camera
+                mat4.perspective(45, c_width / c_height, 0.1, 10000.0, pMatrix);
+                mat4.identity(mvMatrix);
+                mat4.translate(mvMatrix, [cam_x, cam_y, cam_z]); //Sets the camera to a reasonable distance to view the part
+                mat4.rotate(mvMatrix, angle * Math.PI / 180, [0, 1, 0]);
+
+                //not actually sure what this does :/
+                gl.uniformMatrix4fv(prg.uMVMatrix, false, mvMatrix);
+                gl.uniformMatrix4fv(prg.uPMatrix, false, pMatrix);
+                mat4.set(mvMatrix, nMatrix);
+                mat4.inverse(nMatrix);
+                mat4.transpose(nMatrix);
+                gl.uniformMatrix4fv(prg.uNMatrix, false, nMatrix);
+
+
+                try {
+
+                    gl.enableVertexAttribArray(prg.aVertexPosition);
+                    gl.enableVertexAttribArray(prg.aVertexNormal);
+
+                    //rebinds buffers for translated model.
+                    gl.bindBuffer(gl.ARRAY_BUFFER, modelVerticesBuffer);
+                    gl.vertexAttribPointer(prg.aVertexPosition, 3, gl.FLOAT, false, 0, 0);
+
+                    gl.bindBuffer(gl.ARRAY_BUFFER, modelNormalBuffer);
+                    gl.vertexAttribPointer(prg.aVertexNormal, 3, gl.FLOAT, false, 0, 0);
+
+                    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, modelIndicesBuffer);
+                    gl.drawElements(gl.TRIANGLES, indices.length, gl.UNSIGNED_SHORT, 0);
+
+                }
+                catch (err) {
+                    alert(err);
+                    message(err.description);
+                }
+            }
+
+            var lastTime = 0;
+            /**
+            * Updates the angle of rotation by a little bit each time
+            */
+            function animate() {
+                var timeNow = new Date().getTime();
+                if (lastTime != 0) {
+                    var elapsed = timeNow - lastTime;
+                    angle += (180 * elapsed) / 10000.0;
+                }
+                lastTime = timeNow;
+            }
+
+            /**
+            * Render Loop
+            */
+            function renderLoop() {
+                requestAnimFrame(renderLoop);
+                drawScene();
+                animate();
+            }
+
+            /**
+             * change model to load and display
+             *
+             * @param op drop down menue option
+             */
+            function ChangeRenderModel(op) {
+                renderModelState = (op.options[op.selectedIndex].value);
+            }
+
+            /**
+             * "main" function, what starts first.
+             */
+            function runWebGL() {
+                // gets context
+                gl = utils.getGLContext("Model_space");
+                //sets background color
+                gl.clearColor(clearColor[0], clearColor[1], clearColor[2], clearColor[3]);
+                gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+                //initlises program
+                initProgram();
+
+                loadModel("models/teddy.json");
+
+                //init Lights
+                initLight();
+
+                
+
+                //redners animates and loops through animation.
+                renderLoop();
+
+            }
+
+        </script>
+
+        <!-- Drop down menu -->
+        <div id="bottom">
+            Please Select a model to display:
+            <select onChange='ChangeRenderModel(this)'>
+                <option value='HEAD' select='selected'>head</option>
+                <option value='PUMPKIN'>Pumpkin</option>
+                <option value='SPHERE'>Sphere</option>
+                <option value='TEAPOT'>Teapot</option>
+                <option value='TEDDY'>teddy</option>
+            </select>
+        </div>
+    </body>
+</html>
